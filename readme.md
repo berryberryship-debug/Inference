@@ -1,6 +1,6 @@
-Inférence IA en Python
+## Inférence IA en Python
 Programme minimal pour charger un modèle de langage, lui poser une question et afficher sa réponse dans le terminal.
-Ce projet utilise Qwen/Qwen2.5-0.5B-Instruct avec PyTorch et Hugging Face Transformers.
+# Ce projet utilise Qwen/Qwen2.5-0.5B-Instruct avec PyTorch et Hugging Face Transformers.
 Fonctionnalités
 Questions et réponses depuis le terminal.
 Consigne de réponse en français.
