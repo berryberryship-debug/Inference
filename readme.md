@@ -1,6 +1,6 @@
-## Inférence IA en Python
+# Inférence IA en Python
 Programme minimal pour charger un modèle de langage, lui poser une question et afficher sa réponse dans le terminal.
-# Ce projet utilise Qwen/Qwen2.5-0.5B-Instruct avec PyTorch et Hugging Face Transformers.
+## Ce projet utilise Qwen/Qwen2.5-0.5B-Instruct avec PyTorch et Hugging Face Transformers.
 Fonctionnalités
 Questions et réponses depuis le terminal.
 Consigne de réponse en français.
@@ -13,7 +13,7 @@ inference-ia/
 ├── requirements.txt
 ├── .gitignore
 └── inference.py
-Prérequis
+## Prérequis
 Python et pip.
 Une connexion Internet pour télécharger les dépendances et les fichiers du modèle.
 Un environnement compatible avec PyTorch.
@@ -26,7 +26,7 @@ Dans PowerShell :
 Activer l’environnement sous Linux ou macOS
 source .venv/bin/activate
 Installer les dépendances
-Le fichier requirements.txt doit contenir :
+## Le fichier requirements.txt doit contenir :
 torch
 transformers
 Installez ensuite les dépendances :
