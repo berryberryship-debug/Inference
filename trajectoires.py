@@ -2,209 +2,400 @@
 # -*- coding: utf-8 -*-
 
 """
-Enregistrement des trajectoires F-I-B sur un graphe fixe.
+Enregistrement générique de trajectoires numériques.
+
+Dépendance :
+    numpy
+
+Aucun autre fichier Python du projet n'est nécessaire.
 
 Ce module :
-- utilise les équations de dynamique_double_courant.step ;
-- conserve les états à intervalles réguliers ;
-- enregistre toujours l'état initial et l'état final ;
-- vérifie les dimensions et les valeurs finies ;
-- exporte les trajectoires dans un fichier NumPy compressé.
+- reçoit un état initial et une fonction d'évolution ;
+- enregistre les états à intervalles réguliers ;
+- conserve toujours l'état initial et l'état final ;
+- vérifie les noms, les dimensions et les valeurs finies ;
+- sauvegarde les résultats dans une archive NumPy compressée.
 
-Les indices temporels sont des numéros d'itération.
-Aucune unité de temps physique ou biologique n'est supposée.
+Les indices enregistrés sont des numéros d'itération.
+Aucune durée physique ou biologique n'est supposée.
 
-Dépendances :
-    numpy
-    dynamique_double_courant.py
+Exécution directe :
+    python trajectoires.py
+
+L'exécution directe lance uniquement un test technique utilisant
+un état constant. Ce test ne définit pas un modèle scientifique.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Callable, Dict, Mapping, Tuple
 
 import numpy as np
 
 
-if __package__:
-    from .dynamique_double_courant import laplacien_graphe, step
-else:
-    from dynamique_double_courant import laplacien_graphe, step
+Etat = Mapping[str, np.ndarray]
+Evolution = Callable[[Etat, int], Etat]
 
 
-@dataclass(frozen=True)
-class Trajectoire:
-    """États enregistrés, de forme (nombre_enregistrements, nombre_noeuds)."""
-
-    iterations: np.ndarray
-    F: np.ndarray
-    I: np.ndarray
-    B: np.ndarray
-
-    def sauvegarder(self, chemin: str | Path) -> Path:
-        """Exporte les tableaux dans une archive .npz."""
-        destination = Path(chemin)
-
-        if destination.suffix != ".npz":
-            destination = Path(f"{destination}.npz")
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        np.savez_compressed(
-            destination,
-            iterations=self.iterations,
-            F=self.F,
-            I=self.I,
-            B=self.B,
-        )
-
-        return destination
-
-
-def _entier_valide(
+def verifier_entier(
     valeur: int,
     nom: str,
     minimum: int,
 ) -> int:
-    """Refuse les booléens, les flottants et les entiers hors limites."""
-    if isinstance(valeur, (bool, np.bool_)) or not isinstance(
-        valeur, (int, np.integer)
-    ):
+    """Valide un entier sans convertir silencieusement un flottant."""
+    if isinstance(valeur, (bool, np.bool_)):
+        raise TypeError(f"{nom} doit être un entier, pas un booléen.")
+
+    if not isinstance(valeur, (int, np.integer)):
         raise TypeError(f"{nom} doit être un entier.")
 
     resultat = int(valeur)
 
     if resultat < minimum:
-        raise ValueError(f"{nom} doit être supérieur ou égal à {minimum}.")
+        raise ValueError(
+            f"{nom} doit être supérieur ou égal à {minimum}."
+        )
 
     return resultat
 
 
-def _champ_valide(
-    valeurs: np.ndarray,
-    nom: str,
-    n_noeuds: int,
-) -> np.ndarray:
-    """Valide et copie un champ sans modifier le tableau fourni."""
-    champ = np.asarray(valeurs, dtype=float)
-
-    if champ.shape != (n_noeuds,):
-        raise ValueError(
-            f"{nom} doit avoir la forme ({n_noeuds},), "
-            f"forme reçue : {champ.shape}."
+def copier_etat(
+    etat: Etat,
+) -> Dict[str, np.ndarray]:
+    """Valide et copie tous les champs d'un état."""
+    if not isinstance(etat, Mapping):
+        raise TypeError(
+            "L'état doit être un dictionnaire ou un mapping."
         )
 
-    if not np.all(np.isfinite(champ)):
-        raise ValueError(f"{nom} contient des valeurs non finies.")
+    if len(etat) == 0:
+        raise ValueError(
+            "L'état doit contenir au moins un champ."
+        )
 
-    return champ.copy()
+    resultat: Dict[str, np.ndarray] = {}
+
+    for nom, valeurs in etat.items():
+        if not isinstance(nom, str) or not nom.strip():
+            raise ValueError(
+                "Chaque champ doit avoir un nom non vide."
+            )
+
+        tableau = np.asarray(valeurs, dtype=float)
+
+        if tableau.size == 0:
+            raise ValueError(
+                f"Le champ {nom!r} est vide."
+            )
+
+        if not np.all(np.isfinite(tableau)):
+            raise ValueError(
+                f"Le champ {nom!r} contient des valeurs non finies."
+            )
+
+        resultat[nom] = tableau.copy()
+
+    return resultat
 
 
-def simuler_trajectoire(
-    F: np.ndarray,
-    I: np.ndarray,
-    B: np.ndarray,
-    adjacency: np.ndarray,
+def simuler(
+    etat_initial: Etat,
+    evolution: Evolution,
     n_steps: int,
-    parametres_step: Mapping[str, Any],
     enregistrer_tous: int = 1,
-) -> Trajectoire:
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
-    Fait évoluer les champs et conserve leur trajectoire.
+    Exécute une évolution et enregistre sa trajectoire.
 
     Parameters
     ----------
-    F, I, B :
-        Champs initiaux, chacun de forme (N,).
-    adjacency :
-        Matrice d'adjacence de forme (N, N).
-        Aucun changement de graphe n'est effectué pendant cette simulation.
+    etat_initial :
+        Dictionnaire de champs numériques.
+        Exemple : {"F": F, "I": I, "B": B}.
+
+    evolution :
+        Fonction appelée sous la forme :
+
+            nouvel_etat = evolution(etat, transition)
+
+        Elle reçoit une copie de l'état courant et l'indice
+        de la transition, compris entre 0 et n_steps - 1.
+
+        Elle doit retourner les mêmes noms de champs,
+        avec les mêmes formes.
+
     n_steps :
-        Nombre de mises à jour.
-    parametres_step :
-        Arguments nommés transmis sans modification à step.
+        Nombre de transitions à effectuer.
+
     enregistrer_tous :
-        Intervalle entre deux enregistrements.
+        Nombre de transitions entre deux enregistrements.
         L'état initial et l'état final sont toujours conservés.
 
     Returns
     -------
-    Trajectoire
-        Copies des états enregistrés et indices d'itération associés.
+    iterations :
+        Tableau des numéros d'itération enregistrés.
+
+    champs :
+        Dictionnaire de tableaux.
+        Le premier axe de chaque tableau correspond aux
+        itérations enregistrées.
 
     Notes
     -----
-    B est vérifié comme champ numérique fini, sans imposer qu'il reste
-    binaire : cette propriété dépend des équations de step.
+    Ce module ne définit pas les équations d'évolution.
+    Les variables peuvent être continues ou discrètes,
+    mais doivent rester numériques et finies.
     """
-    n_steps = _entier_valide(n_steps, "n_steps", minimum=0)
-    enregistrer_tous = _entier_valide(
+    n_steps = verifier_entier(
+        n_steps,
+        "n_steps",
+        minimum=0,
+    )
+
+    enregistrer_tous = verifier_entier(
         enregistrer_tous,
         "enregistrer_tous",
         minimum=1,
     )
 
-    A = np.asarray(adjacency, dtype=float).copy()
+    if not callable(evolution):
+        raise TypeError(
+            "evolution doit être une fonction appelable."
+        )
 
-    if A.ndim != 2 or A.shape[0] != A.shape[1]:
-        raise ValueError("adjacency doit être une matrice carrée.")
+    etat = copier_etat(etat_initial)
 
-    n_noeuds = A.shape[0]
-
-    if n_noeuds == 0:
-        raise ValueError("Le graphe doit contenir au moins un nœud.")
-
-    if not np.all(np.isfinite(A)):
-        raise ValueError("adjacency contient des valeurs non finies.")
-
-    f = _champ_valide(F, "F", n_noeuds)
-    i = _champ_valide(I, "I", n_noeuds)
-    b = _champ_valide(B, "B", n_noeuds)
-
-    L = np.asarray(laplacien_graphe(A), dtype=float)
-
-    if L.shape != A.shape:
-        raise ValueError("Le laplacien n'a pas la forme attendue.")
-
-    if not np.all(np.isfinite(L)):
-        raise ValueError("Le laplacien contient des valeurs non finies.")
-
-    parametres = dict(parametres_step)
+    formes = {
+        nom: valeurs.shape
+        for nom, valeurs in etat.items()
+    }
 
     iterations = [0]
-    historique_f = [f.copy()]
-    historique_i = [i.copy()]
-    historique_b = [b.copy()]
 
-    for iteration in range(1, n_steps + 1):
-        f_suivant, i_suivant, b_suivant = step(
-            f,
-            i,
-            b,
-            L,
-            **parametres,
+    historique = {
+        nom: [valeurs.copy()]
+        for nom, valeurs in etat.items()
+    }
+
+    for transition in range(n_steps):
+        prochain_etat = evolution(
+            copier_etat(etat),
+            transition,
         )
 
         try:
-            f = _champ_valide(f_suivant, "F", n_noeuds)
-            i = _champ_valide(i_suivant, "I", n_noeuds)
-            b = _champ_valide(b_suivant, "B", n_noeuds)
-        except ValueError as erreur:
+            etat = copier_etat(prochain_etat)
+        except (TypeError, ValueError) as erreur:
             raise ValueError(
-                f"État invalide après l'itération {iteration} : {erreur}"
+                "État invalide après la transition "
+                f"{transition} : {erreur}"
             ) from erreur
 
-        if iteration % enregistrer_tous == 0 or iteration == n_steps:
-            iterations.append(iteration)
-            historique_f.append(f.copy())
-            historique_i.append(i.copy())
-            historique_b.append(b.copy())
+        if set(etat) != set(formes):
+            raise ValueError(
+                "Les noms des champs ont changé après "
+                f"la transition {transition}."
+            )
 
-    return Trajectoire(
-        iterations=np.asarray(iterations, dtype=np.int64),
-        F=np.stack(historique_f),
-        I=np.stack(historique_i),
-        B=np.stack(historique_b),
+        for nom, forme_attendue in formes.items():
+            if etat[nom].shape != forme_attendue:
+                raise ValueError(
+                    f"La forme du champ {nom!r} a changé après "
+                    f"la transition {transition} : "
+                    f"{etat[nom].shape} au lieu de {forme_attendue}."
+                )
+
+        iteration = transition + 1
+
+        if (
+            iteration % enregistrer_tous == 0
+            or iteration == n_steps
+        ):
+            iterations.append(iteration)
+
+            for nom, valeurs in etat.items():
+                historique[nom].append(valeurs.copy())
+
+    return (
+        np.asarray(iterations, dtype=np.int64),
+        {
+            nom: np.stack(valeurs, axis=0)
+            for nom, valeurs in historique.items()
+        },
     )
+
+
+def sauvegarder(
+    chemin: str | Path,
+    iterations: np.ndarray,
+    champs: Mapping[str, np.ndarray],
+) -> Path:
+    """
+    Sauvegarde une trajectoire dans une archive .npz.
+
+    L'archive contient :
+    - iterations ;
+    - champ_F, champ_I, etc., selon les noms des champs.
+
+    Un fichier déjà présent au même emplacement est remplacé.
+    """
+    indices = np.asarray(iterations)
+
+    if indices.ndim != 1 or indices.size == 0:
+        raise ValueError(
+            "iterations doit être un tableau 1D non vide."
+        )
+
+    if not np.issubdtype(indices.dtype, np.integer):
+        raise TypeError(
+            "iterations doit contenir des entiers."
+        )
+
+    if np.any(indices < 0):
+        raise ValueError(
+            "Les indices d'itération doivent être non négatifs."
+        )
+
+    if np.any(indices[1:] <= indices[:-1]):
+        raise ValueError(
+            "Les indices d'itération doivent être "
+            "strictement croissants."
+        )
+
+    champs_valides = copier_etat(champs)
+
+    for nom, valeurs in champs_valides.items():
+        if valeurs.ndim == 0:
+            raise ValueError(
+                f"Le champ {nom!r} doit avoir un axe temporel."
+            )
+
+        if valeurs.shape[0] != len(indices):
+            raise ValueError(
+                f"Le champ {nom!r} contient "
+                f"{valeurs.shape[0]} états, mais "
+                f"{len(indices)} itérations sont fournies."
+            )
+
+    destination = Path(chemin)
+
+    if destination.suffix != ".npz":
+        destination = Path(f"{destination}.npz")
+
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    donnees = {
+        "iterations": indices,
+        **{
+            f"champ_{nom}": valeurs
+            for nom, valeurs in champs_valides.items()
+        },
+    }
+
+    np.savez_compressed(
+        destination,
+        **donnees,
+    )
+
+    return destination
+
+
+def test_enregistrement() -> None:
+    """
+    Vérifie l'enregistrement et la sauvegarde d'un état constant.
+
+    Il s'agit d'un test technique, pas d'une simulation
+    des mécanismes F-I-B.
+    """
+    etat_initial = {
+        "F": np.array([0.1, 0.2, 0.3]),
+        "I": np.array([-0.1, 0.0, 0.1]),
+        "B": np.array([0.0, 1.0, 1.0]),
+    }
+
+    def evolution_identite(
+        etat: Etat,
+        transition: int,
+    ) -> Etat:
+        return etat
+
+    iterations, champs = simuler(
+        etat_initial=etat_initial,
+        evolution=evolution_identite,
+        n_steps=10,
+        enregistrer_tous=3,
+    )
+
+    np.testing.assert_array_equal(
+        iterations,
+        np.array([0, 3, 6, 9, 10]),
+    )
+
+    for nom, initial in etat_initial.items():
+        attendu = np.repeat(
+            initial[np.newaxis, :],
+            repeats=len(iterations),
+            axis=0,
+        )
+
+        np.testing.assert_array_equal(
+            champs[nom],
+            attendu,
+        )
+
+    # Vérifier également le cas sans transition.
+    iterations_zero, champs_zero = simuler(
+        etat_initial=etat_initial,
+        evolution=evolution_identite,
+        n_steps=0,
+    )
+
+    np.testing.assert_array_equal(
+        iterations_zero,
+        np.array([0]),
+    )
+
+    for nom, initial in etat_initial.items():
+        np.testing.assert_array_equal(
+            champs_zero[nom],
+            initial[np.newaxis, :],
+        )
+
+    destination = sauvegarder(
+        "resultats/test_enregistrement.npz",
+        iterations,
+        champs,
+    )
+
+    with np.load(
+        destination,
+        allow_pickle=False,
+    ) as archive:
+        np.testing.assert_array_equal(
+            archive["iterations"],
+            iterations,
+        )
+
+        for nom, valeurs in champs.items():
+            np.testing.assert_array_equal(
+                archive[f"champ_{nom}"],
+                valeurs,
+            )
+
+    print("Test d'enregistrement réussi.")
+    print("Test sans transition réussi.")
+    print("Test de sauvegarde et de relecture réussi.")
+    print(f"Archive créée : {destination}")
+    print(
+        "Ce test utilise un état constant : "
+        "aucune dynamique scientifique n'est encore définie."
+    )
+
+
+if __name__ == "__main__":
+    test_enregistrement()
