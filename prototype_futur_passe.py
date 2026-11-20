@@ -6,19 +6,22 @@ cd ~
 cat > prototype_futur_passe.py <<'PYTHON'
 #!/usr/bin/env python3
 """
-Prototype hippocampo-cingulaire du "futur passé".
+Prototype hippocampo-cingulaire du "futur passe".
 
-Le modèle contient :
-    - un réseau spatial excitateur/inhibiteur E-I ;
-    - un état contextuel cingulaire C ;
-    - un générateur hippocampique latent H ;
-    - une scène spatiale décodée depuis H ;
-    - une mémoire autobiographique actuelle M_passe ;
-    - une mémoire anticipée M_futur_passe ;
-    - un indice de continuité temporelle.
+Le modele contient :
+    - un reseau spatial excitateur/inhibiteur E-I ;
+    - un etat contextuel cingulaire C ;
+    - un generateur hippocampique latent H ;
+    - une scene spatiale decodee depuis H ;
+    - une memoire autobiographique actuelle M_passe ;
+    - une memoire anticipee M_futur_passe ;
+    - un indice de continuite temporelle.
 
-Ce modèle est conceptuel et ne constitue pas un modèle biophysique
-validé de la conscience.
+Le futur simule est calcule uniquement a partir de l'etat present.
+Il ne modifie jamais les etats passes E, I, C ou M_passe.
+
+Ce modele est conceptuel et ne constitue pas un modele biophysique
+valide de la conscience.
 """
 
 from pathlib import Path
@@ -28,14 +31,14 @@ import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------
-# Paramètres
+# Parametres
 # ---------------------------------------------------------------------
 
 SEED = 1234
-N = 80                  # nombre de nœuds spatiaux
+N = 80                  # nombre de noeuds spatiaux
 DIM_H = 12              # dimension latente hippocampique
 DIM_C = 4               # dimensions contextuelles cingulaires
-DIM_M = 16               # dimension de la mémoire autobiographique
+DIM_M = 16              # dimension de la memoire autobiographique
 
 DT = 0.02
 DUREE = 300.0
@@ -52,10 +55,19 @@ D_I = 0.05
 
 SIGMA_SPATIALE = 0.20
 BRUIT_HIPPOCAMPIQUE = 0.025
+BRUIT_FUTUR = 0.025
 
-# q = 0 : veille dominée par les entrées
-# q = 1 : génération interne dominée par l'hippocampe
+# q = 0 : veille dominee par les entrees
+# q = 1 : generation interne dominee par l'hippocampe
 Q_REVE = 0.80
+
+T0_CAUSALITE = 150.0
+PAS_T0 = int(round(T0_CAUSALITE / DT))
+
+GRAINE_FUTUR_A = 1
+GRAINE_FUTUR_B = 2
+
+DECALAGE_CONTROLE = 25.0
 
 DOSSIER_SORTIE = Path(
     "resultats/prototype_futur_passe"
@@ -63,7 +75,7 @@ DOSSIER_SORTIE = Path(
 
 
 # ---------------------------------------------------------------------
-# Fonctions numériques
+# Fonctions numeriques
 # ---------------------------------------------------------------------
 
 def sigmoid(x):
@@ -128,7 +140,7 @@ def initialiser_parametres(rng, points):
 
     adjacency, laplacien = construire_graphe(points)
 
-    # Couplages du réseau spatial
+    # Couplages du reseau spatial
     W_EE = 1.55 * adjacency
     W_IE = 1.25 * adjacency
     W_EI = 1.85 * np.eye(n)
@@ -141,7 +153,7 @@ def initialiser_parametres(rng, points):
         size=(DIM_H, DIM_H),
     )
 
-    # Une légère récurrence structurée
+    # Une legere recurrence structuree
     W_HH += 0.75 * np.eye(DIM_H)
 
     W_HC = rng.normal(
@@ -177,14 +189,14 @@ def initialiser_parametres(rng, points):
         size=(DIM_C, DIM_H),
     )
 
-    # Décodeur hippocampe -> scène spatiale
+    # Decodeur hippocampe -> scene spatiale
     decodeur_scene = rng.normal(
         0.0,
         0.90 / np.sqrt(DIM_H),
         size=(n, DIM_H),
     )
 
-    # Projection vers la mémoire autobiographique
+    # Encodeur commun vers l'espace autobiographique
     W_MEM_G = rng.normal(
         0.0,
         0.35,
@@ -200,13 +212,6 @@ def initialiser_parametres(rng, points):
     W_MEM_H = rng.normal(
         0.0,
         0.20 / np.sqrt(DIM_H),
-        size=(DIM_M, DIM_H),
-    )
-
-    # Projection de la scène future vers la mémoire anticipée
-    W_FUTUR_PASSE = rng.normal(
-        0.0,
-        0.70 / np.sqrt(DIM_H),
         size=(DIM_M, DIM_H),
     )
 
@@ -227,15 +232,64 @@ def initialiser_parametres(rng, points):
         "W_MEM_G": W_MEM_G,
         "W_MEM_C": W_MEM_C,
         "W_MEM_H": W_MEM_H,
-        "W_FUTUR_PASSE": W_FUTUR_PASSE,
     }
 
 
+def encoder_memoire(
+    etat_global,
+    contexte,
+    etat_hippocampique,
+    parametres,
+):
+    """
+    Encode differents etats dans le meme espace
+    autobiographique de dimension DIM_M.
+    """
+    entree = (
+        parametres["W_MEM_G"] @ etat_global
+        + parametres["W_MEM_C"] @ contexte
+        + parametres["W_MEM_H"] @ etat_hippocampique
+    )
+
+    return np.tanh(entree)
+
+
+def generer_futur(
+    etat_hippocampique,
+    contexte,
+    etat_global,
+    parametres,
+    rng_futur,
+):
+    """
+    Genere un etat hippocampique futur a partir de l'etat present.
+
+    Le futur ne modifie jamais l'etat passe.
+    """
+    bruit_futur = BRUIT_FUTUR * rng_futur.normal(
+        size=DIM_H
+    )
+
+    H_futur = np.tanh(
+        parametres["W_HH"] @ etat_hippocampique
+        + parametres["W_HC"] @ contexte
+        + parametres["W_HG"] @ etat_global
+        + bruit_futur
+    )
+
+    return H_futur
+
+
 # ---------------------------------------------------------------------
-# Dynamique du modèle
+# Dynamique du modele
 # ---------------------------------------------------------------------
 
-def simuler(rng, points, parametres):
+def simuler(
+    rng,
+    points,
+    parametres,
+    graine_futur=GRAINE_FUTUR_A,
+):
     n = len(points)
 
     L = parametres["laplacien"]
@@ -255,12 +309,9 @@ def simuler(rng, points, parametres):
 
     decodeur_scene = parametres["decodeur_scene"]
 
-    W_MEM_G = parametres["W_MEM_G"]
-    W_MEM_C = parametres["W_MEM_C"]
-    W_MEM_H = parametres["W_MEM_H"]
-    W_FUTUR_PASSE = parametres["W_FUTUR_PASSE"]
+    rng_futur = np.random.default_rng(graine_futur)
 
-    # Activités initiales
+    # Activites initiales
     E = 0.45 + 0.01 * rng.normal(size=n)
     I = 0.35 + 0.01 * rng.normal(size=n)
 
@@ -268,18 +319,17 @@ def simuler(rng, points, parametres):
     C = np.array([
         0.8,   # saillance
         0.4,   # valence
-        0.2,   # état corporel
+        0.2,   # etat corporel
         0.6,   # but personnel
     ])
 
     # Etat latent hippocampique
     H = 0.10 * rng.normal(size=DIM_H)
 
-    # Mémoire autobiographique courante
+    # Memoire autobiographique courante
     M_passe = np.zeros(DIM_M)
 
-    # Entrée contextuelle persistante.
-    # Elle représente un contexte personnel donné.
+    # Entree contextuelle persistante.
     contexte_externe = np.array([
         0.60,
         0.20,
@@ -299,8 +349,9 @@ def simuler(rng, points, parametres):
     historique_continuite = np.zeros(N_PAS)
     historique_stabilite = np.zeros(N_PAS)
 
-    # Petite entrée sensorielle spatiale fixe.
-    # Elle sert seulement à ancrer le réseau dans une géométrie.
+    test_causalite = None
+
+    # Petite entree sensorielle spatiale fixe.
     centre = np.array([0.50, 0.50])
     distance2 = np.sum(
         (points - centre) ** 2,
@@ -323,7 +374,7 @@ def simuler(rng, points, parametres):
         ])
 
         # -------------------------------------------------------------
-        # 1. Hippocampe : génération d'une scène latente
+        # 1. Hippocampe : generation d'une scene latente
         # -------------------------------------------------------------
 
         bruit_H = BRUIT_HIPPOCAMPIQUE * rng.normal(
@@ -345,18 +396,17 @@ def simuler(rng, points, parametres):
         H = H + DT * dH
 
         # -------------------------------------------------------------
-        # 2. Décodeur hippocampique : scène spatiale
+        # 2. Decodeur hippocampique : scene spatiale
         # -------------------------------------------------------------
 
         scene = sigmoid(
             decodeur_scene @ H
         )
 
-        # Le mode rêve augmente le poids de la scène interne.
         scene_top_down = Q_REVE * scene
 
         # -------------------------------------------------------------
-        # 3. Cingulaire : sélection et contextualisation
+        # 3. Cingulaire : selection et contextualisation
         # -------------------------------------------------------------
 
         entree_C = (
@@ -374,7 +424,7 @@ def simuler(rng, points, parametres):
         C = C + DT * dC
 
         # -------------------------------------------------------------
-        # 4. Réseau E/I spatial
+        # 4. Reseau E/I spatial
         # -------------------------------------------------------------
 
         entree_sensorielle = (
@@ -420,7 +470,7 @@ def simuler(rng, points, parametres):
         )
 
         # -------------------------------------------------------------
-        # 5. Mémoire passée et mémoire "futur passé"
+        # 5. Memoire passee et memoire "futur passe"
         # -------------------------------------------------------------
 
         etat_global_actualise = np.array([
@@ -428,23 +478,37 @@ def simuler(rng, points, parametres):
             I.mean(),
         ])
 
-        entree_memoire = (
-            W_MEM_G @ etat_global_actualise
-            + W_MEM_C @ C
-            + W_MEM_H @ H
+        memoire_cible = encoder_memoire(
+            etat_global_actualise,
+            C,
+            H,
+            parametres,
         )
 
         dM = (
             -M_passe
-            + np.tanh(entree_memoire)
+            + memoire_cible
         ) / TAU_M
 
         M_passe = M_passe + DT * dM
 
-        # La représentation anticipée est décodée depuis
-        # l'état hippocampique générant la scène.
-        M_futur_passe = np.tanh(
-            W_FUTUR_PASSE @ H
+        # -------------------------------------------------------------
+        # Futur simule a un pas
+        # -------------------------------------------------------------
+
+        H_futur = generer_futur(
+            H,
+            C,
+            etat_global_actualise,
+            parametres,
+            rng_futur,
+        )
+
+        M_futur_passe = encoder_memoire(
+            etat_global_actualise,
+            C,
+            H_futur,
+            parametres,
         )
 
         continuite = cosinus(
@@ -453,7 +517,7 @@ def simuler(rng, points, parametres):
         )
 
         # -------------------------------------------------------------
-        # 6. Mesure de stabilité locale de la scène
+        # 6. Mesure de stabilite locale de la scene
         # -------------------------------------------------------------
 
         perturbations = (
@@ -475,6 +539,75 @@ def simuler(rng, points, parametres):
         stabilite_scene = float(
             np.mean(stabilites)
         )
+
+        # -------------------------------------------------------------
+        # 7. Test d'invariance du passe
+        # -------------------------------------------------------------
+
+        if pas == PAS_T0:
+            etat_t0 = {
+                "E": E.copy(),
+                "I": I.copy(),
+                "C": C.copy(),
+                "H": H.copy(),
+                "M_passe": M_passe.copy(),
+            }
+
+            H_futur_A = generer_futur(
+                etat_t0["H"],
+                etat_t0["C"],
+                etat_global_actualise,
+                parametres,
+                np.random.default_rng(GRAINE_FUTUR_A),
+            )
+
+            H_futur_B = generer_futur(
+                etat_t0["H"],
+                etat_t0["C"],
+                etat_global_actualise,
+                parametres,
+                np.random.default_rng(GRAINE_FUTUR_B),
+            )
+
+            M_futur_A = encoder_memoire(
+                etat_global_actualise,
+                etat_t0["C"],
+                H_futur_A,
+                parametres,
+            )
+
+            M_futur_B = encoder_memoire(
+                etat_global_actualise,
+                etat_t0["C"],
+                H_futur_B,
+                parametres,
+            )
+
+            difference_passes = max(
+                np.max(np.abs(etat_t0["E"] - E)),
+                np.max(np.abs(etat_t0["I"] - I)),
+                np.max(np.abs(etat_t0["C"] - C)),
+                np.max(np.abs(etat_t0["M_passe"] - M_passe)),
+            )
+
+            difference_futures = np.linalg.norm(
+                M_futur_A - M_futur_B
+            )
+
+            if difference_passes > 1e-12:
+                raise RuntimeError(
+                    "Le futur simule a modifie un etat passe."
+                )
+
+            test_causalite = {
+                "temps_t0": T0_CAUSALITE,
+                "difference_etats_passes": float(
+                    difference_passes
+                ),
+                "difference_memories_futures": float(
+                    difference_futures
+                ),
+            }
 
         # Enregistrement
         historique_E[pas] = E
@@ -498,7 +631,162 @@ def simuler(rng, points, parametres):
         "M_futur_passe": historique_M_futur,
         "continuite": historique_continuite,
         "stabilite_scene": historique_stabilite,
+        "test_causalite": test_causalite,
         "points": points,
+    }
+
+
+# ---------------------------------------------------------------------
+# Controles et mesures
+# ---------------------------------------------------------------------
+
+def ajouter_controle_temporel(resultats):
+    m_passe = resultats["M_passe"]
+    m_futur = resultats["M_futur_passe"]
+
+    decalage_controle = int(
+        round(DECALAGE_CONTROLE / DT)
+    )
+
+    continuite_controle = np.zeros(N_PAS)
+
+    for t in range(N_PAS):
+        t_controle = (
+            t + decalage_controle
+        ) % N_PAS
+
+        continuite_controle[t] = cosinus(
+            m_passe[t],
+            m_futur[t_controle],
+        )
+
+    resultats["continuite_controle"] = (
+        continuite_controle
+    )
+
+    return resultats
+
+
+def mesurer_dynamique_tardive(resultats):
+    periode_analyse = int(
+        round(50.0 / DT)
+    )
+
+    scene_tardive = resultats["scene"][
+        -periode_analyse:
+    ]
+
+    H_tardif = resultats["H"][
+        -periode_analyse:
+    ]
+
+    variation_scene = float(
+        np.mean(
+            np.linalg.norm(
+                np.diff(scene_tardive, axis=0),
+                axis=1,
+            )
+        )
+    )
+
+    variation_H = float(
+        np.mean(
+            np.linalg.norm(
+                np.diff(H_tardif, axis=0),
+                axis=1,
+            )
+        )
+    )
+
+    continuite_tardive = float(
+        np.mean(
+            resultats["continuite"][
+                -periode_analyse:
+            ]
+        )
+    )
+
+    continuite_controle_tardive = float(
+        np.mean(
+            resultats["continuite_controle"][
+                -periode_analyse:
+            ]
+        )
+    )
+
+    return {
+        "variation_scene": variation_scene,
+        "variation_H": variation_H,
+        "continuite_tardive": continuite_tardive,
+        "continuite_controle_tardive": (
+            continuite_controle_tardive
+        ),
+    }
+
+
+def tester_non_signalisation(
+    points,
+    parametres,
+):
+    """
+    Deux simulations identiques jusqu'a T0, avec des futurs simules
+    differents, doivent produire exactement les memes etats passes.
+    """
+    rng_A = np.random.default_rng(SEED)
+    rng_B = np.random.default_rng(SEED)
+
+    trajectoire_A = simuler(
+        rng_A,
+        points,
+        parametres,
+        graine_futur=GRAINE_FUTUR_A,
+    )
+
+    trajectoire_B = simuler(
+        rng_B,
+        points,
+        parametres,
+        graine_futur=GRAINE_FUTUR_B,
+    )
+
+    difference_avant_t0 = max(
+        np.max(
+            np.abs(
+                trajectoire_A["E"][:PAS_T0 + 1]
+                - trajectoire_B["E"][:PAS_T0 + 1]
+            )
+        ),
+        np.max(
+            np.abs(
+                trajectoire_A["I"][:PAS_T0 + 1]
+                - trajectoire_B["I"][:PAS_T0 + 1]
+            )
+        ),
+        np.max(
+            np.abs(
+                trajectoire_A["C"][:PAS_T0 + 1]
+                - trajectoire_B["C"][:PAS_T0 + 1]
+            )
+        ),
+        np.max(
+            np.abs(
+                trajectoire_A["M_passe"][:PAS_T0 + 1]
+                - trajectoire_B["M_passe"][:PAS_T0 + 1]
+            )
+        ),
+    )
+
+    if difference_avant_t0 > 1e-12:
+        raise RuntimeError(
+            "Le choix du futur simule modifie le passe : "
+            "fuite d'information future."
+        )
+
+    return {
+        "difference_avant_t0": float(
+            difference_avant_t0
+        ),
+        "temps_t0": T0_CAUSALITE,
     }
 
 
@@ -514,6 +802,7 @@ def tracer_resultats(resultats):
 
     scene_moyenne = resultats["scene"].mean(axis=1)
     continuite = resultats["continuite"]
+    continuite_controle = resultats["continuite_controle"]
     stabilite = resultats["stabilite_scene"]
 
     fig, axes = plt.subplots(
@@ -535,9 +824,9 @@ def tracer_resultats(resultats):
         label="I moyen",
     )
 
-    axes[0].set_ylabel("Activité")
+    axes[0].set_ylabel("Activite")
     axes[0].set_title(
-        "Réseau neuronal excitateur-inhibiteur"
+        "Reseau neuronal excitateur-inhibiteur"
     )
     axes[0].legend()
 
@@ -554,18 +843,25 @@ def tracer_resultats(resultats):
     axes[2].plot(
         temps,
         scene_moyenne,
-        label="Intensité moyenne de la scène",
+        label="Intensite moyenne de la scene",
     )
 
     axes[2].plot(
         temps,
         continuite,
-        label="Continuité passé / futur-passé",
+        label="Continuite futur-passe",
+    )
+
+    axes[2].plot(
+        temps,
+        continuite_controle,
+        label="Controle decale",
+        linestyle="--",
     )
 
     axes[2].set_ylabel("Indice")
     axes[2].set_title(
-        "Scène hippocampique et continuité temporelle"
+        "Scene hippocampique et continuite temporelle"
     )
     axes[2].legend()
 
@@ -573,13 +869,13 @@ def tracer_resultats(resultats):
         temps,
         stabilite,
         color="tab:green",
-        label="Stabilité locale de la scène",
+        label="Stabilite locale de la scene",
     )
 
-    axes[3].set_ylabel("Similarité")
-    axes[3].set_xlabel("Temps du modèle")
+    axes[3].set_ylabel("Similarite")
+    axes[3].set_xlabel("Temps du modele")
     axes[3].set_title(
-        "Stabilité de l'attracteur spatio-temporel"
+        "Stabilite de l'attracteur spatio-temporel"
     )
     axes[3].legend()
 
@@ -617,11 +913,29 @@ def main():
         rng,
         points,
         parametres,
+        graine_futur=GRAINE_FUTUR_A,
+    )
+
+    resultats = ajouter_controle_temporel(
+        resultats
+    )
+
+    mesures = mesurer_dynamique_tardive(
+        resultats
+    )
+
+    test_non_signalisation = tester_non_signalisation(
+        points,
+        parametres,
     )
 
     np.savez_compressed(
         DOSSIER_SORTIE / "trajectoire.npz",
-        **resultats,
+        **{
+            cle: valeur
+            for cle, valeur in resultats.items()
+            if cle != "test_causalite"
+        },
     )
 
     tracer_resultats(resultats)
@@ -635,25 +949,74 @@ def main():
         resultats["continuite"][-nombre_final:]
     )
 
+    continuite_controle_finale = np.mean(
+        resultats["continuite_controle"][-nombre_final:]
+    )
+
     stabilite_finale = np.mean(
         resultats["stabilite_scene"][-nombre_final:]
     )
 
-    print("=== Prototype du futur passé ===")
-    print(f"Nœuds spatiaux : {N}")
+    print("=== Prototype du futur passe ===")
+    print(f"Noeuds spatiaux : {N}")
     print(f"Dimension H : {DIM_H}")
     print(f"Dimension C : {DIM_C}")
-    print(f"Durée : {DUREE}")
+    print(f"Duree : {DUREE}")
     print(
-        "Continuité passé/futur-passé finale : "
+        "Continuite futur-passe finale : "
         f"{continuite_finale:.6f}"
     )
     print(
-        "Stabilité finale de la scène : "
-        f"{stabilite_finale:.6f}"
+        "Continuite controle decalee finale : "
+        f"{continuite_controle_finale:.6f}"
     )
     print(
-        f"Résultats : {DOSSIER_SORTIE}"
+        "Stabilite finale de la scene : "
+        f"{stabilite_finale:.6f}"
+    )
+
+    print("\n=== Dynamique tardive ===")
+    print(
+        "Variation temporelle de la scene : "
+        f"{mesures['variation_scene']:.6e}"
+    )
+    print(
+        "Variation temporelle de H : "
+        f"{mesures['variation_H']:.6e}"
+    )
+    print(
+        "Continuite futur-passe tardive : "
+        f"{mesures['continuite_tardive']:.6f}"
+    )
+    print(
+        "Continuite controle decalee tardive : "
+        f"{mesures['continuite_controle_tardive']:.6f}"
+    )
+
+    print("\n=== Test de causalite ===")
+    print(
+        "Difference des etats passes apres generation "
+        "de deux futurs : "
+        f"{resultats['test_causalite']['difference_etats_passes']:.6e}"
+    )
+    print(
+        "Difference des memoires futures : "
+        f"{resultats['test_causalite']['difference_memories_futures']:.6e}"
+    )
+
+    print("\n=== Test de non-signalisation ===")
+    print(
+        "Difference avant t0 entre deux futurs simules : "
+        f"{test_non_signalisation['difference_avant_t0']:.6e}"
+    )
+
+    print(f"\nResultats : {DOSSIER_SORTIE}")
+    print(
+        "Le futur simule est une hypothese calculee depuis le present ; "
+        "il ne modifie aucun etat passe."
+    )
+    print(
+        "Aucune interpretation clinique ou de conscience."
     )
 
 
