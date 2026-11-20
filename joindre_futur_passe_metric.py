@@ -3,7 +3,261 @@ set -euo pipefail
 
 cd ~
 
-cat > joindre_futur_passe_metrique.py <<'PYTHON'
+# ---------------------------------------------------------------------
+# 1. Creation / mise a jour de metrique_subjective.py
+# ---------------------------------------------------------------------
+
+cat > metrique_subjective.py <<'PYTHON'
+#!/usr/bin/env python3
+"""
+Metrique subjective technique.
+
+Cette implementation utilise :
+    - une standardisation optionnelle des variables ;
+    - un positionnement multidimensionnel classique (MDS) ;
+    - une projection lineaire regularisee permettant de transformer
+      de nouveaux etats dans le meme espace latent.
+
+La matrice D fournie a fit() est une matrice de dissimilarites.
+Ici, elle est construite a partir de distances euclidiennes, mais
+elle pourrait ensuite provenir d'annotations humaines ou de
+donnees comportementales.
+
+Ce module ne mesure pas la conscience ni une experience subjective.
+Il fournit uniquement une reduction de dimension technique.
+"""
+
+import numpy as np
+
+
+def ball_volume_factor(dimension):
+    from math import gamma, pi
+
+    dimension = int(dimension)
+
+    if dimension < 1:
+        raise ValueError(
+            "La dimension doit etre un entier positif."
+        )
+
+    return float(
+        pi ** (dimension / 2.0)
+        / gamma(dimension / 2.0 + 1.0)
+    )
+
+
+class SubjectiveMetric:
+    def __init__(
+        self,
+        k=6,
+        reg=1e-2,
+        standardize=True,
+    ):
+        self.k = int(k)
+
+        if self.k < 1:
+            raise ValueError(
+                "k doit etre un entier positif."
+            )
+
+        self.reg = float(reg)
+
+        if self.reg <= 0.0:
+            raise ValueError(
+                "reg doit etre strictement positif."
+            )
+
+        self.standardize = bool(standardize)
+
+        self.moyenne_ = None
+        self.ecart_type_ = None
+        self.projection_ = None
+        self.dimensions_latentes_ = None
+
+    def _standardiser(self, X, apprentissage=False):
+        X = np.asarray(X, dtype=float)
+
+        if X.ndim != 2:
+            raise ValueError(
+                "X doit avoir la forme (n_etats, n_features)."
+            )
+
+        if apprentissage:
+            self.moyenne_ = X.mean(axis=0)
+
+            ecart_type = X.std(axis=0)
+
+            ecart_type = np.where(
+                ecart_type < 1e-12,
+                1.0,
+                ecart_type,
+            )
+
+            self.ecart_type_ = ecart_type
+
+        if self.moyenne_ is None or self.ecart_type_ is None:
+            raise RuntimeError(
+                "La metrique doit etre ajustee avant transform()."
+            )
+
+        return (
+            X - self.moyenne_
+        ) / self.ecart_type_
+
+    def fit(
+        self,
+        X,
+        D,
+        select_k=False,
+        verbose=False,
+    ):
+        X = np.asarray(X, dtype=float)
+        D = np.asarray(D, dtype=float)
+
+        if X.ndim != 2:
+            raise ValueError(
+                "X doit avoir la forme (n_etats, n_features)."
+            )
+
+        if D.ndim != 2:
+            raise ValueError(
+                "D doit avoir la forme (n_etats, n_etats)."
+            )
+
+        if X.shape[0] != D.shape[0]:
+            raise ValueError(
+                "X et D doivent avoir le meme nombre d'etats."
+            )
+
+        if D.shape[0] != D.shape[1]:
+            raise ValueError(
+                "D doit etre carree."
+            )
+
+        if not np.allclose(D, D.T, atol=1e-10):
+            raise ValueError(
+                "D doit etre symetrique."
+            )
+
+        if np.any(np.diag(D) != 0.0):
+            raise ValueError(
+                "La diagonale de D doit etre nulle."
+            )
+
+        if not np.all(np.isfinite(D)):
+            raise ValueError(
+                "D contient des valeurs non finies."
+            )
+
+        X_standardise = self._standardiser(
+            X,
+            apprentissage=True,
+        )
+
+        n_etats = X.shape[0]
+
+        if n_etats < self.k + 1:
+            raise ValueError(
+                "Il faut au moins k + 1 etats pour ajuster "
+                "une metrique de dimension k."
+            )
+
+        D2 = D ** 2
+
+        J = np.eye(n_etats) - (
+            np.ones((n_etats, n_etats))
+            / n_etats
+        )
+
+        B = -0.5 * (J @ D2 @ J)
+        B = 0.5 * (B + B.T)
+
+        valeurs, vecteurs = np.linalg.eigh(B)
+
+        ordre = np.argsort(valeurs)[::-1]
+
+        valeurs = valeurs[ordre]
+        vecteurs = vecteurs[:, ordre]
+
+        if select_k:
+            positif = valeurs > 1e-10
+
+            nombre_dimensions = max(
+                1,
+                int(np.sum(positif)),
+            )
+
+            self.k = min(
+                self.k,
+                nombre_dimensions,
+            )
+
+        valeurs = valeurs[: self.k]
+        vecteurs = vecteurs[:, : self.k]
+
+        valeurs = np.maximum(valeurs, 0.0)
+
+        Z_train = vecteurs * np.sqrt(valeurs)[None, :]
+
+        self.dimensions_latentes_ = self.k
+
+        gramme = X_standardise.T @ X_standardise
+
+        gramme_regularise = (
+            gramme
+            + self.reg
+            * np.eye(gramme.shape[0])
+        )
+
+        self.projection_ = np.linalg.solve(
+            gramme_regularise,
+            X_standardise.T @ Z_train,
+        )
+
+        if verbose:
+            print(
+                "Metrique ajustee : "
+                f"{self.k} dimensions latentes."
+            )
+
+        return self
+
+    def transform(self, X):
+        if self.projection_ is None:
+            raise RuntimeError(
+                "La metrique doit etre ajustee avant transform()."
+            )
+
+        X_standardise = self._standardiser(
+            X,
+            apprentissage=False,
+        )
+
+        return X_standardise @ self.projection_
+
+    def fit_transform(
+        self,
+        X,
+        D,
+        select_k=False,
+        verbose=False,
+    ):
+        self.fit(
+            X,
+            D,
+            select_k=select_k,
+            verbose=verbose,
+        )
+
+        return self.transform(X)
+PYTHON
+
+
+# ---------------------------------------------------------------------
+# 2. Reecriture complete de joindre_futur_passe_metric.py
+# ---------------------------------------------------------------------
+
+cat > joindre_futur_passe_metric.py <<'PYTHON'
 #!/usr/bin/env python3
 """
 Jonction entre le prototype du futur passe et la metrique subjective.
@@ -55,10 +309,6 @@ from metrique_subjective import (
 )
 
 
-# ---------------------------------------------------------------------
-# Parametres de la jonction
-# ---------------------------------------------------------------------
-
 # Seuil temporel local au script de jonction.
 # Il separe les etats d'entrainement et d'evaluation.
 T0_CAUSALITE = 0.5 * DUREE
@@ -78,13 +328,9 @@ NOMBRE_BOOTSTRAP = 2000
 GRAINE_BOOTSTRAP = 1234
 
 DOSSIER_SORTIE = Path(
-    "resultats/jonction_futur_passe_metrique"
+    "resultats/jonction_futur_passe_metric"
 )
 
-
-# ---------------------------------------------------------------------
-# Representation multimodale
-# ---------------------------------------------------------------------
 
 def resume_scene(scene, points):
     scene = np.asarray(scene, dtype=float)
@@ -119,10 +365,7 @@ def resume_scene(scene, points):
 
 
 def distances_euclidiennes(X):
-    X = np.asarray(
-        X,
-        dtype=float,
-    )
+    X = np.asarray(X, dtype=float)
 
     if X.ndim != 2:
         raise ValueError(
@@ -241,10 +484,6 @@ def construire_etat_present(
         "X_present": X_present,
     }
 
-
-# ---------------------------------------------------------------------
-# Ensembles de futurs
-# ---------------------------------------------------------------------
 
 def calculer_contexte_constant(
     resultats,
@@ -429,10 +668,6 @@ def permuter_ensemble_scenes(
     return resultat
 
 
-# ---------------------------------------------------------------------
-# Volume latent
-# ---------------------------------------------------------------------
-
 def volume_covariance_latente(
     Z,
     regularisation=REGULARISATION,
@@ -571,10 +806,6 @@ def analyser_volume_futur(
         "Z_futurs": Z_futurs,
     }
 
-
-# ---------------------------------------------------------------------
-# Transformations et statistiques
-# ---------------------------------------------------------------------
 
 def transformer_ancrage(ancrage):
     ancrage = np.clip(
@@ -833,10 +1064,6 @@ def ratio_geometrique(
     )
 
 
-# ---------------------------------------------------------------------
-# Visualisation
-# ---------------------------------------------------------------------
-
 def tracer_mesures(
     temps,
     volumes_attaches,
@@ -898,10 +1125,6 @@ def tracer_mesures(
     fig.savefig(chemin, dpi=150)
     plt.close(fig)
 
-
-# ---------------------------------------------------------------------
-# Programme principal
-# ---------------------------------------------------------------------
 
 def main():
     DOSSIER_SORTIE.mkdir(
@@ -1404,8 +1627,8 @@ if __name__ == "__main__":
     main()
 PYTHON
 
-python -m py_compile prototype_futur_passe.py
 python -m py_compile metrique_subjective.py
-python -m py_compile joindre_futur_passe_metrique.py
+python -m py_compile joindre_futur_passe_metric.py
 
-python -X faulthandler -u joindre_futur_passe_metrique.py 2>&1 | tee erreur_termux.txt
+python -X faulthandler -u joindre_futur_passe_metric.py \
+  2>&1 | tee erreur_termux.txt
