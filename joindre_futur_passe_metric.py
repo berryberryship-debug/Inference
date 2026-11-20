@@ -28,6 +28,11 @@ from pathlib import Path
 import json
 
 import numpy as np
+
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 
 from prototype_futur_passe import (
@@ -65,7 +70,7 @@ GRAINE_PERMUTATIONS = 20000
 
 REGULARISATION = 1e-8
 
-LONGUEURS_BLOCS = [50, 100, 200]
+LONGUEURS_BLOCS = [4, 8, 12]
 NOMBRE_BOOTSTRAP = 2000
 GRAINE_BOOTSTRAP = 1234
 
@@ -108,6 +113,39 @@ def resume_scene(scene, points):
         float(centre[0]),
         float(centre[1]),
     ])
+
+
+def distances_euclidiennes(X):
+    X = np.asarray(
+        X,
+        dtype=float,
+    )
+
+    if X.ndim != 2:
+        raise ValueError(
+            "X doit avoir la forme (n_etats, n_features)."
+        )
+
+    differences = (
+        X[:, None, :]
+        - X[None, :, :]
+    )
+
+    distances = np.linalg.norm(
+        differences,
+        axis=2,
+    )
+
+    distances = 0.5 * (
+        distances + distances.T
+    )
+
+    np.fill_diagonal(
+        distances,
+        0.0,
+    )
+
+    return distances
 
 
 def construire_vecteur_multimodal(
@@ -327,7 +365,65 @@ def generer_ensemble_futur(
         "scenes_utilisees": scenes_utilisees,
         "permutation_scenes": permutation,
         "contexte_utilise": contexte_utilise,
+        "etat_global": etat["etat_global"],
     }
+
+
+def permuter_ensemble_scenes(
+    ensemble,
+    points,
+    graine,
+):
+    """
+    Permute uniquement les scenes entre branches.
+
+    H_futurs, M_futurs et le contexte restent inchanges.
+    """
+    nombre_branches = len(
+        ensemble["H_futurs"]
+    )
+
+    rng = np.random.default_rng(
+        graine
+    )
+
+    permutation = rng.permutation(
+        nombre_branches
+    )
+
+    scenes_utilisees = (
+        ensemble["scenes_futures"][permutation]
+    )
+
+    X_futurs = []
+
+    for branche in range(nombre_branches):
+        X_future = construire_vecteur_multimodal(
+            ensemble["H_futurs"][branche],
+            ensemble["contexte_utilise"],
+            ensemble["etat_global"],
+            ensemble["M_futurs"][branche],
+            scenes_utilisees[branche],
+            points,
+        )
+
+        X_futurs.append(X_future)
+
+    resultat = dict(ensemble)
+
+    resultat["X_futurs"] = np.asarray(
+        X_futurs
+    )
+
+    resultat["scenes_utilisees"] = (
+        scenes_utilisees
+    )
+
+    resultat["permutation_scenes"] = (
+        permutation
+    )
+
+    return resultat
 
 
 # ---------------------------------------------------------------------
@@ -740,10 +836,10 @@ def ratio_geometrique(
 
 def tracer_mesures(
     temps,
-    volumes,
+    volumes_attaches,
     ancrages,
     distances,
-    volumes_attaches,
+    volumes_futurs,
 ):
     fig, axes = plt.subplots(
         4,
@@ -754,7 +850,7 @@ def tracer_mesures(
 
     axes[0].plot(
         temps,
-        volumes,
+        volumes_futurs,
         color="tab:blue",
     )
     axes[0].set_ylabel("Volume futur")
@@ -862,11 +958,22 @@ def main():
 
     X_train = np.asarray(X_train)
 
-    metrique = SubjectiveMetric(
-        k=DIMENSION_LATENTE
+    D_train = distances_euclidiennes(
+        X_train
     )
 
-    metrique.fit(X_train)
+    metrique = SubjectiveMetric(
+        k=DIMENSION_LATENTE,
+        reg=1e-2,
+        standardize=True,
+    )
+
+    metrique.fit(
+        X_train,
+        D_train,
+        select_k=False,
+        verbose=False,
+    )
 
     indices_analyse = np.linspace(
         0,
@@ -881,13 +988,17 @@ def main():
     ])
 
     ancrage_reel = np.zeros(NOMBRE_INSTANTS)
-    volume_reel = np.zeros(NOMBRE_INSTANTS)
+    volume_attache_reel = np.zeros(NOMBRE_INSTANTS)
+    volume_futur_reel = np.zeros(NOMBRE_INSTANTS)
     distance_reel = np.zeros(NOMBRE_INSTANTS)
 
     ancrage_constante = np.zeros(
         (NOMBRE_PERMUTATIONS, NOMBRE_INSTANTS)
     )
-    volume_constante = np.zeros(
+    volume_attache_constante = np.zeros(
+        (NOMBRE_PERMUTATIONS, NOMBRE_INSTANTS)
+    )
+    volume_futur_constante = np.zeros(
         (NOMBRE_PERMUTATIONS, NOMBRE_INSTANTS)
     )
     distance_constante = np.zeros(
@@ -897,7 +1008,10 @@ def main():
     ancrage_permute = np.zeros(
         (NOMBRE_PERMUTATIONS, NOMBRE_INSTANTS)
     )
-    volume_permute = np.zeros(
+    volume_attache_permute = np.zeros(
+        (NOMBRE_PERMUTATIONS, NOMBRE_INSTANTS)
+    )
+    volume_futur_permute = np.zeros(
         (NOMBRE_PERMUTATIONS, NOMBRE_INSTANTS)
     )
     distance_permute = np.zeros(
@@ -929,66 +1043,86 @@ def main():
         ancrage_reel[numero] = mesure_reelle[
             "ancrage_cosinus"
         ]
-        volume_reel[numero] = mesure_reelle[
+        volume_attache_reel[numero] = mesure_reelle[
             "volume_futur_attache"
+        ]
+        volume_futur_reel[numero] = mesure_reelle[
+            "volume_futur"
         ]
         distance_reel[numero] = mesure_reelle[
             "distance_present_futur"
         ]
 
-        ensemble_contexte_constant = (
-            generer_ensemble_futur(
-                resultats,
-                index,
-                parametres,
-                points,
-                nombre_branches=NOMBRE_BRANCHES,
-                graine=graine,
-                contexte_futur=contexte_constant,
-            )
-        )
-
-        mesure_contexte_constant = (
-            analyser_volume_futur(
-                ensemble_contexte_constant,
-                metrique,
-            )
-        )
-
-        ancrage_constante[:, numero] = (
-            mesure_contexte_constant[
-                "ancrage_cosinus"
-            ]
-        )
-        volume_constante[:, numero] = (
-            mesure_contexte_constant[
-                "volume_futur_attache"
-            ]
-        )
-        distance_constante[:, numero] = (
-            mesure_contexte_constant[
-                "distance_present_futur"
-            ]
-        )
-
         for repetition in range(
             NOMBRE_PERMUTATIONS
         ):
-            graine_permutation = (
+            graine_constante = (
                 GRAINE_PERMUTATIONS
+                + 100000
                 + repetition * 100
                 + numero
             )
 
-            ensemble_permute = (
+            ensemble_contexte_constant = (
                 generer_ensemble_futur(
                     resultats,
                     index,
                     parametres,
                     points,
                     nombre_branches=NOMBRE_BRANCHES,
-                    graine=graine_permutation,
-                    permuter_scenes=True,
+                    graine=graine_constante,
+                    contexte_futur=contexte_constant,
+                    permuter_scenes=False,
+                )
+            )
+
+            mesure_contexte_constant = (
+                analyser_volume_futur(
+                    ensemble_contexte_constant,
+                    metrique,
+                )
+            )
+
+            ancrage_constante[
+                repetition,
+                numero,
+            ] = mesure_contexte_constant[
+                "ancrage_cosinus"
+            ]
+
+            volume_attache_constante[
+                repetition,
+                numero,
+            ] = mesure_contexte_constant[
+                "volume_futur_attache"
+            ]
+
+            volume_futur_constante[
+                repetition,
+                numero,
+            ] = mesure_contexte_constant[
+                "volume_futur"
+            ]
+
+            distance_constante[
+                repetition,
+                numero,
+            ] = mesure_contexte_constant[
+                "distance_present_futur"
+            ]
+
+        for repetition in range(
+            NOMBRE_PERMUTATIONS
+        ):
+            ensemble_permute = (
+                permuter_ensemble_scenes(
+                    ensemble_reel,
+                    points,
+                    graine=(
+                        GRAINE_PERMUTATIONS
+                        + repetition * 100
+                        + numero
+                    ),
                 )
             )
 
@@ -1005,10 +1139,16 @@ def main():
                 "ancrage_cosinus"
             ]
 
-            volume_permute[
+            volume_attache_permute[
                 repetition, numero
             ] = mesure_permutee[
                 "volume_futur_attache"
+            ]
+
+            volume_futur_permute[
+                repetition, numero
+            ] = mesure_permutee[
+                "volume_futur"
             ]
 
             distance_permute[
@@ -1021,7 +1161,7 @@ def main():
             f"Instant {numero + 1}/{NOMBRE_INSTANTS} : "
             f"t={temps[numero]:.2f}, "
             f"A={ancrage_reel[numero]:.4f}, "
-            f"V={volume_reel[numero]:.4e}, "
+            f"V={volume_attache_reel[numero]:.4e}, "
             f"D={distance_reel[numero]:.4f}"
         )
 
@@ -1033,9 +1173,9 @@ def main():
     )
 
     resultat_volume = calculer_contrastes(
-        volume_reel,
-        volume_constante,
-        volume_permute,
+        volume_attache_reel,
+        volume_attache_constante,
+        volume_attache_permute,
         transformer_volume,
     )
 
@@ -1088,9 +1228,17 @@ def main():
         )
     )
 
+    longueurs_blocs_valides = sorted(
+        {
+            int(longueur)
+            for longueur in LONGUEURS_BLOCS
+            if 1 <= int(longueur) <= len(temps)
+        }
+    )
+
     bootstraps = {}
 
-    for longueur_bloc in LONGUEURS_BLOCS:
+    for longueur_bloc in longueurs_blocs_valides:
         bootstraps[
             f"bloc_{longueur_bloc}"
         ] = {
@@ -1145,13 +1293,13 @@ def main():
         }
 
     ratio_volume_constant = ratio_geometrique(
-        volume_reel,
-        volume_constante,
+        volume_attache_reel,
+        volume_attache_constante,
     )
 
     ratio_volume_permute = ratio_geometrique(
-        volume_reel,
-        volume_permute,
+        volume_attache_reel,
+        volume_attache_permute,
     )
 
     rapport = {
@@ -1162,13 +1310,16 @@ def main():
         "nombre_permutations": NOMBRE_PERMUTATIONS,
         "temps": temps.tolist(),
         "ancrage_reel": ancrage_reel.tolist(),
-        "volume_reel": volume_reel.tolist(),
+        "volume_attache_reel": volume_attache_reel.tolist(),
+        "volume_futur_reel": volume_futur_reel.tolist(),
         "distance_reel": distance_reel.tolist(),
         "ancrage_constante": ancrage_constante.tolist(),
-        "volume_constante": volume_constante.tolist(),
+        "volume_attache_constante": volume_attache_constante.tolist(),
+        "volume_futur_constante": volume_futur_constante.tolist(),
         "distance_constante": distance_constante.tolist(),
         "ancrage_permute": ancrage_permute.tolist(),
-        "volume_permute": volume_permute.tolist(),
+        "volume_attache_permute": volume_attache_permute.tolist(),
+        "volume_futur_permute": volume_futur_permute.tolist(),
         "distance_permute": distance_permute.tolist(),
         "p_ancrage_constant": p_ancrage_constant.tolist(),
         "p_ancrage_permute": p_ancrage_permute.tolist(),
@@ -1193,10 +1344,10 @@ def main():
 
     tracer_mesures(
         temps,
-        volume_reel,
+        volume_attache_reel,
         ancrage_reel,
         distance_reel,
-        volume_reel,
+        volume_futur_reel,
     )
 
     print("\n=== Contrastes moyens ===")
@@ -1210,11 +1361,11 @@ def main():
         f"{moyenne_valide(resultat_ancrage['contraste_permute']):.6f}"
     )
     print(
-        "log volume reel - contexte constant : "
+        "log volume attache reel - contexte constant : "
         f"{moyenne_valide(resultat_volume['contraste_constant']):.6f}"
     )
     print(
-        "log volume reel - scenes permutees : "
+        "log volume attache reel - scenes permutees : "
         f"{moyenne_valide(resultat_volume['contraste_permute']):.6f}"
     )
     print(
@@ -1228,11 +1379,11 @@ def main():
 
     print("\n=== Ratios geometriques ===")
     print(
-        "Ratio volume reel / contexte constant : "
+        "Ratio volume attache reel / contexte constant : "
         f"{ratio_volume_constant:.6f}"
     )
     print(
-        "Ratio volume reel / scenes permutees : "
+        "Ratio volume attache reel / scenes permutees : "
         f"{ratio_volume_permute:.6f}"
     )
 
@@ -1250,5 +1401,8 @@ if __name__ == "__main__":
     main()
 PYTHON
 
+python -m py_compile prototype_futur_passe.py
+python -m py_compile metrique_subjective.py
 python -m py_compile joindre_futur_passe_metrique.py
+
 python -u joindre_futur_passe_metrique.py
