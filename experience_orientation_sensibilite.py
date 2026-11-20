@@ -51,7 +51,8 @@ def nettoyer_json(objet):
 
 '''
 
-texte = texte[:index] + aide + texte[index:]
+if "def float_json(" not in texte:
+    texte = texte[:index] + aide + texte[index:]
 
 # 2. Remplacer analyser_direction par une version sans NaN.
 debut = texte.index("def analyser_direction(")
@@ -150,9 +151,9 @@ nouvelle_fonction = '''def analyser_direction(
 
 texte = texte[:debut] + nouvelle_fonction + texte[fin:]
 
-# 3. Remplacer le bloc d'ecriture JSON.
+# 3. Remplacer le bloc d'ecriture JSON, avec des marqueurs robustes.
 debut = texte.index(
-    '    with (\n        DOSSIER / "resume.json"'
+    '    with (DOSSIER / "resume.json").open('
 )
 fin = texte.index(
     '\n\n    print(f"\\nResultats : {DOSSIER}")',
