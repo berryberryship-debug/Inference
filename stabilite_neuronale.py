@@ -1,9 +1,9 @@
 cd ~
-cp -p stabilite_neuronale.py stabilite_neuronale.py.avant_version_complete.bak
+cp -p stabilite_neuronale.py stabilite_neuronale.py.avant_jacobien_sigmoide.bak
 
 cat > stabilite_neuronale.py <<'PYTHON'
 #!/usr/bin/env python3
-"""Audit spectral d'un modele E-I abstrait sur un graphe synthetique."""
+"""Audit spectral coherent d'un modele E-I abstrait avec sigmoide."""
 
 import csv
 import json
@@ -37,6 +37,11 @@ DOSSIER = Path("resultats/stabilite_neuronale")
 
 def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
+
+
+PENTE_SIGMOIDE_EQUILIBRE = float(
+    sigmoid(0.5) * (1.0 - sigmoid(0.5))
+)
 
 
 def construire_graphe(points):
@@ -96,11 +101,13 @@ def entrees(w_EE):
 
 
 def jacobien_homogene(w_EE):
-    """Jacobien du mode homogene autour de E = I = 0.5."""
+    """Jacobien homogene incluant la pente de la sigmoide."""
+    p = PENTE_SIGMOIDE_EQUILIBRE
+
     return np.array(
         [
-            [-1.0 + w_EE / 4.0, -W_EI],
-            [W_IE / TAU_I, -1.0 / TAU_I - W_II / TAU_I],
+            [(-1.0 + w_EE * p) / TAU_E, -W_EI * p / TAU_E],
+            [W_IE * p / TAU_I, (-1.0 - W_II * p) / TAU_I],
         ]
     )
 
@@ -155,6 +162,10 @@ def main():
 
     print("=== Audit spectral excitation-inhibition ===")
     print("Graphe synthetique ; parametres non calibres.")
+    print(
+        "Pente de la sigmoide a l'equilibre : "
+        f"{PENTE_SIGMOIDE_EQUILIBRE:.9f}"
+    )
 
     rng = np.random.default_rng(SEED)
     points = rng.uniform(0.0, 1.0, size=(N, 3))
@@ -240,6 +251,7 @@ def main():
 
     resume = {
         "statut": "Audit spectral synthetique, non calibre",
+        "pente_sigmoide_equilibre": PENTE_SIGMOIDE_EQUILIBRE,
         "seed": SEED,
         "N": N,
         "K": K,
