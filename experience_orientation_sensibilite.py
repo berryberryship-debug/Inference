@@ -1,272 +1,189 @@
 cd ~
 
-cat > experience_orientation_sensibilite.py <<'PYTHON'
-#!/usr/bin/env python3
-"""Sensibilite de la propagation orientee a l'amplitude et au seuil."""
-
-import json
+python - <<'PYTHON'
 from pathlib import Path
 
-import numpy as np
-from scipy.ndimage import uniform_filter1d
+fichier = Path("experience_orientation_sensibilite.py")
+texte = fichier.read_text(encoding="utf-8")
 
-import stabilite_neuronale as modele
-from experience_orientation import (
-    laplacien_entree,
-    matrice_couplage_orientee,
-)
-from experience_orientation_localisee import (
-    analyser_direction,
-    construire_profil_local,
-    construire_rhs_forcage,
-    simuler_segment,
-    temps_arrivee,
-)
+# 1. Ajouter les convertisseurs avant les constantes.
+marqueur = "W_EE = 8.0"
+index = texte.index(marqueur)
 
-W_EE = 8.0
-DT = 0.05
+aide = '''def float_json(valeur):
+    """Convertit en float JSON ; les valeurs non finies deviennent None."""
+    if valeur is None:
+        return None
 
-T_DEBUT_PERTURBATION = 160.0
-T_FIN = 240.0
+    valeur = float(valeur)
 
-AMPLITUDE_INITIALE = 1e-4
-SEED_PERTURBATION = 123
+    if not np.isfinite(valeur):
+        return None
 
-KAPPAS = [0.0, 1.0, 2.0, 4.0]
-AMPLITUDES_IMPULSION = [0.01, 0.1, 1.0]
-FRACTIONS_SEUIL = [0.10, 0.20, 0.30]
-
-NOEUD_SOURCE = 0
-SIGMA_SPATIAL = 0.10
-DUREE_IMPULSION = 1.0
-DUREE_SOUTIEN = 0.50
-
-INTERVALLE_ENREGISTREMENT = 10
-
-DOSSIER = Path(
-    "resultats/experience_orientation_sensibilite"
-)
+    return valeur
 
 
-def main():
-    DOSSIER.mkdir(parents=True, exist_ok=True)
+def nettoyer_json(objet):
+    """Nettoie recursivement NaN et inf avant json.dump."""
+    if isinstance(objet, dict):
+        return {
+            cle: nettoyer_json(valeur)
+            for cle, valeur in objet.items()
+        }
 
-    print("=== Sensibilite de la propagation orientee ===")
-    print(f"Kappas : {KAPPAS}")
-    print(f"Amplitudes : {AMPLITUDES_IMPULSION}")
-    print(f"Seuils : {FRACTIONS_SEUIL}")
+    if isinstance(objet, list):
+        return [nettoyer_json(valeur) for valeur in objet]
 
-    rng = np.random.default_rng(modele.SEED)
-    points = rng.uniform(0.0, 1.0, size=(modele.N, 3))
-    adjacency = modele.construire_graphe(points)
+    if isinstance(objet, tuple):
+        return [nettoyer_json(valeur) for valeur in objet]
 
-    # Champ coherent selon l'axe x.
-    axe = np.array([1.0, 0.0, 0.0])
-    directions = np.repeat(
-        axe[None, :],
-        modele.N,
-        axis=0,
+    if isinstance(objet, np.integer):
+        return int(objet)
+
+    if isinstance(objet, (np.floating, float)):
+        return float_json(objet)
+
+    if isinstance(objet, np.ndarray):
+        return nettoyer_json(objet.tolist())
+
+    return objet
+
+
+'''
+
+texte = texte[:index] + aide + texte[index:]
+
+# 2. Remplacer analyser_direction par une version sans NaN.
+debut = texte.index("def analyser_direction(")
+fin = texte.index("def main():")
+
+nouvelle_fonction = '''def analyser_direction(
+    points,
+    directions,
+    noeud_source,
+    arrivees,
+    temps_source,
+):
+    centre = points[noeud_source]
+
+    direction_source = np.asarray(
+        directions[noeud_source],
+        dtype=float,
     )
 
-    profil_spatial = construire_profil_local(
-        points,
-        NOEUD_SOURCE,
-        SIGMA_SPATIAL,
-    )
+    norme = np.linalg.norm(direction_source)
 
-    rng_initial = np.random.default_rng(SEED_PERTURBATION)
-    etat_initial = 0.5 + AMPLITUDE_INITIALE * rng_initial.normal(
-        size=(2, modele.N)
-    )
+    if norme <= 0.0:
+        raise ValueError("Direction nulle au noeud source.")
 
-    resultats = []
+    direction_source /= norme
 
-    for kappa in KAPPAS:
-        print(f"\nKappa = {kappa:g}")
+    deplacements = points - centre
+    distance_signee = deplacements @ direction_source
 
-        A_oriente = matrice_couplage_orientee(
-            points,
-            adjacency,
-            directions,
-            kappa,
-        )
-        L_oriente = laplacien_entree(A_oriente)
+    resultat = {}
 
-        conservation = np.max(
-            np.abs(L_oriente @ np.ones(modele.N))
+    for nom, masque_direction in (
+        ("avant", distance_signee > 0.0),
+        ("arriere", distance_signee < 0.0),
+    ):
+        masque_valide = (
+            masque_direction
+            & np.isfinite(arrivees)
         )
 
-        if conservation > 1e-10:
-            raise RuntimeError(
-                "Le laplacien ne conserve pas le mode uniforme."
+        distances = np.abs(
+            distance_signee[masque_valide]
+        ).astype(float)
+
+        temps_relatifs = (
+            np.asarray(arrivees[masque_valide])
+            - float(temps_source)
+        ).astype(float)
+
+        entree = {
+            "nombre_noeuds": int(len(distances)),
+            "temps_median": None,
+            "pente_temps_distance": None,
+            "vitesse_apparente": None,
+            "R2": None,
+        }
+
+        if len(distances) > 0:
+            entree["temps_median"] = float_json(
+                np.median(temps_relatifs)
             )
 
-        rhs_repos = construire_rhs_forcage(
-            L_oriente,
-            W_EE,
-            profil_spatial,
+        distances_uniques = np.unique(
+            np.round(distances, decimals=12)
         )
 
-        _, E_repos, I_repos = simuler_segment(
-            rhs_repos,
-            0.0,
-            T_DEBUT_PERTURBATION,
-            etat_initial,
-        )
-
-        etat_regime = np.array([
-            E_repos[-1].copy(),
-            I_repos[-1].copy(),
-        ])
-
-        rhs_controle = construire_rhs_forcage(
-            L_oriente,
-            W_EE,
-            profil_spatial,
-            amplitude_impulsion=0.0,
-        )
-
-        temps, E_controle, I_controle = simuler_segment(
-            rhs_controle,
-            T_DEBUT_PERTURBATION,
-            T_FIN,
-            etat_regime,
-        )
-
-        dt_enregistre = float(np.median(np.diff(temps)))
-        largeur_lissage = max(
-            1,
-            int(round(0.50 / dt_enregistre)),
-        )
-
-        for amplitude in AMPLITUDES_IMPULSION:
-            rhs_impulsion = construire_rhs_forcage(
-                L_oriente,
-                W_EE,
-                profil_spatial,
-                temps_debut_impulsion=T_DEBUT_PERTURBATION,
-                duree_impulsion=DUREE_IMPULSION,
-                amplitude_impulsion=amplitude,
+        if (
+            len(distances) >= 3
+            and len(distances_uniques) >= 2
+            and np.ptp(distances) > 1e-12
+        ):
+            ajustement = linregress(
+                distances,
+                temps_relatifs,
             )
 
-            _, E_impulsion, I_impulsion = simuler_segment(
-                rhs_impulsion,
-                T_DEBUT_PERTURBATION,
-                T_FIN,
-                etat_regime,
-            )
+            pente = float_json(ajustement.slope)
+            rvalue = float_json(ajustement.rvalue)
 
-            delta_E = E_impulsion - E_controle
-            delta_I = I_impulsion - I_controle
+            entree["pente_temps_distance"] = pente
 
-            enveloppe_E = uniform_filter1d(
-                np.abs(delta_E),
-                size=largeur_lissage,
-                axis=0,
-                mode="nearest",
-            )
-            enveloppe_I = uniform_filter1d(
-                np.abs(delta_I),
-                size=largeur_lissage,
-                axis=0,
-                mode="nearest",
-            )
+            if rvalue is not None:
+                entree["R2"] = float_json(rvalue ** 2)
 
-            for fraction in FRACTIONS_SEUIL:
-                arrivees_E, seuil_E = temps_arrivee(
-                    temps,
-                    enveloppe_E,
-                    NOEUD_SOURCE,
-                    fraction,
-                    DUREE_SOUTIEN,
-                    T_DEBUT_PERTURBATION,
+            if pente is not None and pente > 0.0:
+                entree["vitesse_apparente"] = float_json(
+                    1.0 / pente
                 )
 
-                arrivees_I, seuil_I = temps_arrivee(
-                    temps,
-                    enveloppe_I,
-                    NOEUD_SOURCE,
-                    fraction,
-                    DUREE_SOUTIEN,
-                    T_DEBUT_PERTURBATION,
-                )
+        resultat[nom] = entree
 
-                direction_E = analyser_direction(
-                    points,
-                    directions,
-                    NOEUD_SOURCE,
-                    arrivees_E,
-                    T_DEBUT_PERTURBATION,
-                )
+    return resultats
 
-                direction_I = analyser_direction(
-                    points,
-                    directions,
-                    NOEUD_SOURCE,
-                    arrivees_I,
-                    T_DEBUT_PERTURBATION,
-                )
 
-                resultat = {
-                    "kappa": kappa,
-                    "amplitude_impulsion": amplitude,
-                    "fraction_seuil": fraction,
-                    "seuil_E": seuil_E,
-                    "seuil_I": seuil_I,
-                    "nombre_arrivees_E": int(
-                        np.isfinite(arrivees_E).sum()
-                    ),
-                    "nombre_arrivees_I": int(
-                        np.isfinite(arrivees_I).sum()
-                    ),
-                    "amplitude_max_delta_E": float(
-                        np.max(np.abs(delta_E))
-                    ),
-                    "amplitude_max_delta_I": float(
-                        np.max(np.abs(delta_I))
-                    ),
-                    "direction_E": direction_E,
-                    "direction_I": direction_I,
-                }
-                resultats.append(resultat)
+'''
 
-                print(
-                    f"  A={amplitude:g}, seuil={fraction:g} : "
-                    f"E={resultat['nombre_arrivees_E']}/128, "
-                    f"I={resultat['nombre_arrivees_I']}/128, "
-                    f"max_dE={resultat['amplitude_max_delta_E']:.3g}, "
-                    f"max_dI={resultat['amplitude_max_delta_I']:.3g}"
-                )
+texte = texte[:debut] + nouvelle_fonction + texte[fin:]
+
+# 3. Remplacer le bloc d'ecriture JSON.
+debut = texte.index(
+    '    with (\n        DOSSIER / "resume.json"'
+)
+fin = texte.index(
+    '\n\n    print(f"\\nResultats : {DOSSIER}")',
+    debut,
+)
+
+nouveau_bloc = '''    rapport = {
+        "statut": "Sensibilite de la propagation orientee",
+        "w_EE": float(W_EE),
+        "dt": float(DT),
+        "fenetre": [
+            float(T_DEBUT_PERTURBATION),
+            float(T_FIN),
+        ],
+        "noeud_source": int(NOEUD_SOURCE),
+        "sigma_spatial": float(SIGMA_SPATIAL),
+        "duree_impulsion": float(DUREE_IMPULSION),
+        "duree_soutien": float(DUREE_SOUTIEN),
+        "champ_directions": "coherent selon l'axe x",
+        "resultats": resultats,
+    }
+
+    rapport = nettoyer_json(rapport)
 
     with (DOSSIER / "resume.json").open(
         "w", encoding="utf-8"
     ) as f:
-        json.dump(
-            {
-                "statut": "Sensibilite de la propagation orientee",
-                "w_EE": W_EE,
-                "dt": DT,
-                "fenetre": [T_DEBUT_PERTURBATION, T_FIN],
-                "noeud_source": NOEUD_SOURCE,
-                "sigma_spatial": SIGMA_SPATIAL,
-                "duree_impulsion": DUREE_IMPULSION,
-                "duree_soutien": DUREE_SOUTIEN,
-                "champ_directions": "coherent selon l'axe x",
-                "resultats": resultats,
-            },
-            f,
-            indent=2,
-            allow_nan=False,
-        )
+        json.dump(rapport, f, indent=2, allow_nan=False)'''
 
-    print(f"\nResultats : {DOSSIER}")
-    print(
-        "Une reponse globale a faible amplitude indiquerait une "
-        "sensibilisation du regime, pas necessairement une propagation."
-    )
-    print("Aucune interpretation clinique ou de conscience.")
+texte = texte[:debut] + nouveau_bloc + texte[fin:]
 
-
-if __name__ == "__main__":
-    main()
+fichier.write_text(texte, encoding="utf-8")
+print("Correctif applique : NaN convertis en null dans le JSON.")
 PYTHON
