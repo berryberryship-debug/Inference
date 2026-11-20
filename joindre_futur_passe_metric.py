@@ -40,7 +40,6 @@ from prototype_futur_passe import (
     N_PAS,
     DT,
     DUREE,
-    T0_CAUSALITE,
     SEED,
     initialiser_parametres,
     simuler,
@@ -59,6 +58,10 @@ from metrique_subjective import (
 # ---------------------------------------------------------------------
 # Parametres de la jonction
 # ---------------------------------------------------------------------
+
+# Seuil temporel local au script de jonction.
+# Il separe les etats d'entrainement et d'evaluation.
+T0_CAUSALITE = 0.5 * DUREE
 
 DIMENSION_LATENTE = 6
 NOMBRE_BRANCHES = 64
@@ -1405,4 +1408,4 @@ python -m py_compile prototype_futur_passe.py
 python -m py_compile metrique_subjective.py
 python -m py_compile joindre_futur_passe_metrique.py
 
-python -u joindre_futur_passe_metrique.py
+python -X faulthandler -u joindre_futur_passe_metrique.py 2>&1 | tee erreur_termux.txt
