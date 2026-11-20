@@ -2,15 +2,17 @@ cd ~
 
 python - <<'PYTHON'
 from pathlib import Path
+import re
 
 fichier = Path("experience_orientation_sensibilite.py")
 texte = fichier.read_text(encoding="utf-8")
 
-# 1. Ajouter les convertisseurs avant les constantes.
-marqueur = "W_EE = 8.0"
-index = texte.index(marqueur)
+# 1. Ajouter les convertisseurs s'ils sont absents.
+if "def float_json(" not in texte:
+    marqueur = "W_EE = 8.0"
+    index = texte.index(marqueur)
 
-aide = '''def float_json(valeur):
+    aide = '''def float_json(valeur):
     """Convertit en float JSON ; les valeurs non finies deviennent None."""
     if valeur is None:
         return None
@@ -50,13 +52,12 @@ def nettoyer_json(objet):
 
 
 '''
-
-if "def float_json(" not in texte:
     texte = texte[:index] + aide + texte[index:]
 
 # 2. Remplacer analyser_direction par une version sans NaN.
-debut = texte.index("def analyser_direction(")
-fin = texte.index("def main():")
+motif_fonction = (
+    r"def analyser_direction\([\s\S]*?\n\ndef main\(\):"
+)
 
 nouvelle_fonction = '''def analyser_direction(
     points,
@@ -147,17 +148,24 @@ nouvelle_fonction = '''def analyser_direction(
     return resultats
 
 
-'''
+def main():'''
 
-texte = texte[:debut] + nouvelle_fonction + texte[fin:]
-
-# 3. Remplacer le bloc d'ecriture JSON, avec des marqueurs robustes.
-debut = texte.index(
-    '    with (DOSSIER / "resume.json").open('
+texte, nombre_fonction = re.subn(
+    motif_fonction,
+    nouvelle_fonction,
+    texte,
+    count=1,
 )
-fin = texte.index(
-    '\n\n    print(f"\\nResultats : {DOSSIER}")',
-    debut,
+
+if nombre_fonction != 1:
+    raise SystemExit(
+        "La fonction analyser_direction n'a pas pu etre remplacee."
+    )
+
+# 3. Remplacer le bloc d'ecriture JSON par une version nettoyee.
+motif_json = (
+    r'    with \(DOSSIER / "resume\.json"\)\.open\('
+    r"[\s\S]*?allow_nan=False,\s*\n\s*\)"
 )
 
 nouveau_bloc = '''    rapport = {
@@ -183,7 +191,17 @@ nouveau_bloc = '''    rapport = {
     ) as f:
         json.dump(rapport, f, indent=2, allow_nan=False)'''
 
-texte = texte[:debut] + nouveau_bloc + texte[fin:]
+texte, nombre_json = re.subn(
+    motif_json,
+    nouveau_bloc,
+    texte,
+    count=1,
+)
+
+if nombre_json != 1:
+    raise SystemExit(
+        "Le bloc d'ecriture JSON n'a pas pu etre remplace."
+    )
 
 fichier.write_text(texte, encoding="utf-8")
 print("Correctif applique : NaN convertis en null dans le JSON.")
