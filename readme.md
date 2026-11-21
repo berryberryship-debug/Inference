@@ -143,3 +143,18 @@ do_sample=False
 ```python
 device = "cuda" if torch.cuda.is_available() else "cpu"
 ```
+---
+
+## Mise à jour finale : extension expérimentale du dépôt
+
+*Note ajoutée en dernier pour documenter l'évolution du dépôt au-delà du script initial `inference.py`.*
+
+En complément du programme minimal d'inférence interactive (`inference.py`), le dépôt regroupe l'ensemble des scripts expérimentaux suivants :
+
+- **Instrumentation d'inférence LLM (`trajectoire_inference.py`, `trajectoires.py`) :** extraction pas-à-pas des temps de pré-remplissage (*TTFT*) et de décodage (*ITL* / *TPOT*), mesure de l'empreinte mémoire du *KV Cache* et suivi de la norme $L_2$ et de la dérive des états cachés de la dernière couche.
+- **Dynamique neuronale $E/I$ et stabilité (`stabilite_neuronale.py`, `dynamique_neuronale.py`, `experience_longue.py`, `simulation_tres_longue.py`, `robustesse_regime.py`, `experience_repetitions.py`) :** intégration numérique par schéma de Runge-Kutta d'ordre 4 (RK4) sur graphe spatial 3D et étude des régimes oscillatoires et de leur stabilité locale.
+- **Analyse spectrale et phase relative (`analyse_derives_longue.py`, `analyse_oscillations.py`, `analyse_phase_relative.py`, `verification_phase_longue.py`) :** filtrage passe-bande, extraction du signal analytique par transformée de Hilbert et suivi de la dérive de phase relative $E-I$.
+- **Champs d'orientation (`experience_orientation.py`, `experience_orientation_localisee.py`, `experience_orientation_multisources.py`, `experience_orientation_sensibilite.py`, `experience_orientation_sensibilite_inverse.py`, `comparer_champ_orientation.py`) :** étude de la propagation directionnelle d'impulsions localisées sous couplage spatial anisotrope.
+- **Géométrie futur-passé (`prototype_futur_passe.py`, `joindre_futur_passe_metric.py`) :** projection MDS régularisée d'ensembles de branches futures, calcul des volumes de covariance, bootstrap par blocs, tests de permutation et export vérifié par empreintes SHA-256.
+
+**Dépendances supplémentaires (`requirements.txt`) :** `numpy`, `scipy`, `matplotlib` (en plus de `torch` et `transformers`).
